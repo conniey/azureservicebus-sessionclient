@@ -1,0 +1,13 @@
+spring:
+  cloud:
+    azure:
+      servicebus:
+        connection-string: ${AZURE_SERVICEBUS_CONNECTION_STRING}
+        consumer:
+          max-auto-lock-renew-duration: 0
+          receive-mode: PEEK_LOCK
+          prefetch-count: 0
+          session-enabled: true
+          entity-type: queue
+          entity-name: testqueue
+        enabled: true
