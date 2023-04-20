@@ -9,9 +9,11 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import reactor.util.retry.Retry;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -19,7 +21,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
-    private static final int SCHEDULER_INTERVAL_IN_SECONDS = 10;
+    private static final int SCHEDULER_INTERVAL_IN_SECONDS = 30;
+    private static final Duration RETRY_WAIT_TIME = Duration.ofSeconds(4);
     private final AtomicReference<ServiceBusSessionReceiverAsyncClient> asyncClient = new AtomicReference<>();
     private final AtomicBoolean isRunning = new AtomicBoolean();
     private Disposable monitorDisposable;
@@ -77,7 +80,16 @@ public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
         Flux<ServiceBusReceivedMessage> sessionMessages = Flux.usingWhen(
                 this.asyncClient.get().acceptSession(sessionId),
                 receiver -> receiver.receiveMessages(),
-                receiver -> Mono.fromRunnable(() -> receiver.close()));
+                receiver -> Mono.fromRunnable(() -> receiver.close())).retryWhen(
+                Retry.fixedDelay(Long.MAX_VALUE, RETRY_WAIT_TIME)
+                     .filter(throwable -> {
+                         if (!isRunning.get()) {
+                             return false;
+                         }
+                         log.warn("Current LowLevelClient's retry exhausted or a non-retryable error occurred.",
+                                  throwable);
+                         return true;
+                     }));
 
         Disposable messageSubscription = sessionMessages.doOnError(error -> {
             log.error("Error occurred while receiving messages", error);
@@ -85,9 +97,12 @@ public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
             String body = message.getBody().toString();
             System.out.printf("Received Sequence #: %s. Contents: %s%n",
                               message.getSequenceNumber(), message.getBody());
-            if ("Preenu".equals(body)) {
-                asyncClient.get().acceptSession(sessionId).block().deadLetter(message);
+            try {
+                Thread.sleep(600000l);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
             }
+            complete(message);
         }, error -> log.error(error.toString()));
 
     }
@@ -135,5 +150,27 @@ public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
         }
 
         return isChannelClosed;
+    }
+
+    public void complete(ServiceBusReceivedMessage message) {
+        final ServiceBusReceiverAsyncClient lowLevelClient =
+                this.asyncClient.get().acceptSession(sessionId).block();
+
+        lowLevelClient.complete(message).block();
+
+    }
+
+    public void abandon(ServiceBusReceivedMessage message) {
+        final ServiceBusReceiverAsyncClient lowLevelClient =
+                this.asyncClient.get().acceptSession(sessionId).block();
+
+        lowLevelClient.abandon(message).block();
+    }
+
+    public void deadLetter(ServiceBusReceivedMessage message) {
+        final ServiceBusReceiverAsyncClient lowLevelClient =
+                this.asyncClient.get().acceptSession(sessionId).block();
+
+        lowLevelClient.deadLetter(message).block();
     }
 }
