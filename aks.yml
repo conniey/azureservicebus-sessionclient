@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sb-demo-session
+  labels:
+    app: sb-demo-session
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sb-demo-session
+  template:
+    metadata:
+      name: sb-demo-session
+      labels:
+        app: sb-demo-session
+    spec:
+      containers:
+        - name: sb-demo-session
+          image: eggboy/sb-demo-session:0.0.1
+          imagePullPolicy: Always
+          env:
+            - name: AZURE_SERVICEBUS_CONNECTION_STRING
+              value: "Endpoint=sb://sb-demo.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="
+      restartPolicy: Always
