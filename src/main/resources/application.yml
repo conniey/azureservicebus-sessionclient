@@ -4,7 +4,7 @@ spring:
       servicebus:
         connection-string: ${AZURE_SERVICEBUS_CONNECTION_STRING}
         consumer:
-          max-auto-lock-renew-duration: 0
+          max-auto-lock-renew-duration: 600000
           receive-mode: PEEK_LOCK
           prefetch-count: 0
           session-enabled: true
