@@ -61,7 +61,7 @@ public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
 
         if (monitorDisposable == null) {
             monitorDisposable = Schedulers.boundedElastic().schedulePeriodically(() -> {
-                                                                                     boolean isChannelClosed = isChannelClosed(Objects.requireNonNull(
+                                                                            boolean isChannelClosed = isChannelClosed(Objects.requireNonNull(
                                                                                              this.asyncClient.get().acceptSession(sessionId).block()));
 
                                                                                      if (isChannelClosed) {

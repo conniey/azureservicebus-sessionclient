@@ -4,10 +4,22 @@ spring:
       servicebus:
         connection-string: ${AZURE_SERVICEBUS_CONNECTION_STRING}
         consumer:
-          max-auto-lock-renew-duration: 600000
+          max-auto-lock-renew-duration: 9223372036854
           receive-mode: PEEK_LOCK
           prefetch-count: 0
           session-enabled: true
           entity-type: queue
           entity-name: testqueue
         enabled: true
+      client:
+        amqp:
+          transport-type: amqp_web_sockets
+#proton:
+#  trace:
+#    level: INFO
+#logging:
+#  level:
+#    com:
+#      azure:
+#        messaging:
+#          servicebus: DEBUG

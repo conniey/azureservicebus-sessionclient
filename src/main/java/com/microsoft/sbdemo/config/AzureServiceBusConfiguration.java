@@ -19,6 +19,7 @@ public class AzureServiceBusConfiguration {
     @Bean
     public ServiceBusRetryReceiverAsyncClient serviceBusRetryReceiverAsyncClient() {
         serviceBusClientBuilder.disableAutoComplete();
+
         return new ServiceBusRetryReceiverAsyncClient(serviceBusClientBuilder, sessionId);
     }
 }
