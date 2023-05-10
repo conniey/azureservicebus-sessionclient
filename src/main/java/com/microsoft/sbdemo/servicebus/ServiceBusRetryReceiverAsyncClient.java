@@ -9,25 +9,21 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
-import reactor.util.retry.Retry;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.time.Duration;
-import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
     private static final int SCHEDULER_INTERVAL_IN_SECONDS = 30;
+    private static final Duration TIMEOUT = Duration.ofSeconds(SCHEDULER_INTERVAL_IN_SECONDS / 2);
     private static final Duration RETRY_WAIT_TIME = Duration.ofSeconds(4);
-    private final AtomicReference<ServiceBusSessionReceiverAsyncClient> asyncClient = new AtomicReference<>();
     private final AtomicBoolean isRunning = new AtomicBoolean();
+
+    private final AtomicBoolean isCurrentReceiverDisposed = new AtomicBoolean(false);
     private Disposable monitorDisposable;
 
-    private boolean wasStopped = false;
     private final ServiceBusClientBuilder.ServiceBusSessionReceiverClientBuilder serviceBusClientBuilder;
 
     private final String sessionId;
@@ -36,141 +32,122 @@ public class ServiceBusRetryReceiverAsyncClient implements AutoCloseable {
             ServiceBusClientBuilder.ServiceBusSessionReceiverClientBuilder serviceBusClientBuilder,
             String sessionId) {
         this.serviceBusClientBuilder = serviceBusClientBuilder;
-        ServiceBusSessionReceiverAsyncClient client = serviceBusClientBuilder.buildAsyncClient();
-        this.asyncClient.set(client);
         this.sessionId = sessionId;
     }
 
-    public synchronized void start() {
+    public void start() {
         if (isRunning.getAndSet(true)) {
             log.info("ServiceBusRetryReceiverAsyncClient is already running");
             return;
         }
 
-        if (wasStopped) {
-            wasStopped = false;
-        }
+        getClient().subscribe(client -> {
+            log.info("Acquired session client. Starting receive messages.");
+            receiveMessages();
+        });
 
-        if (asyncClient.get() == null) {
-            ServiceBusSessionReceiverAsyncClient newReceiverClient = serviceBusClientBuilder.buildAsyncClient();
-
-            asyncClient.set(newReceiverClient);
-        }
-
-        receiveMessages();
 
         if (monitorDisposable == null) {
             monitorDisposable = Schedulers.boundedElastic().schedulePeriodically(() -> {
-                                                                            boolean isChannelClosed = isChannelClosed(Objects.requireNonNull(
-                                                                                             this.asyncClient.get().acceptSession(sessionId).block()));
-
-                                                                                     if (isChannelClosed) {
-                                                                                         log.error("Channel is closed");
-                                                                                         restartMessageReceiver();
-                                                                                     }
-                                                                                 }, SCHEDULER_INTERVAL_IN_SECONDS, SCHEDULER_INTERVAL_IN_SECONDS,
-                                                                                 TimeUnit.SECONDS);
+                if (isCurrentReceiverDisposed.get()) {
+                    log.info("Restarting message receiver.");
+                    receiveMessages();
+                }
+            }, SCHEDULER_INTERVAL_IN_SECONDS, SCHEDULER_INTERVAL_IN_SECONDS, TimeUnit.SECONDS);
         }
     }
 
-    private synchronized void receiveMessages() {
+    private void receiveMessages() {
         if (!isRunning()) {
             return;
         }
-        Flux<ServiceBusReceivedMessage> sessionMessages = Flux.usingWhen(
-                this.asyncClient.get().acceptSession(sessionId),
-                receiver -> receiver.receiveMessages(),
-                receiver -> Mono.fromRunnable(() -> receiver.close())).retryWhen(
-                Retry.fixedDelay(Long.MAX_VALUE, RETRY_WAIT_TIME)
-                     .filter(throwable -> {
-                         if (!isRunning.get()) {
-                             return false;
-                         }
-                         log.warn("Current LowLevelClient's retry exhausted or a non-retryable error occurred.",
-                                  throwable);
-                         return true;
-                     }));
 
-        Disposable messageSubscription = sessionMessages.doOnError(error -> {
-            log.error("Error occurred while receiving messages", error);
-        }).subscribe(message -> {
+        Flux<ServiceBusReceivedMessage> sessionMessages = Flux.usingWhen(
+                getClient().doOnNext(client -> {
+                    isCurrentReceiverDisposed.set(false);
+                }),
+                receiver -> {
+                    return receiver.receiveMessages();
+                },
+                receiver -> {
+                    return Mono.fromRunnable(() -> {
+                        log.info("Disposing of current receiver.");
+                        isCurrentReceiverDisposed.set(false);
+
+                        receiver.close();
+                    });
+                });
+
+        Disposable messageSubscription = sessionMessages.subscribe(message -> {
             String body = message.getBody().toString();
-            System.out.printf("Received Sequence #: %s. Contents: %s%n",
-                              message.getSequenceNumber(), message.getBody());
+            System.out.printf("Received Sequence #: %s. Contents: %s%n", message.getSequenceNumber(), body);
             try {
-                Thread.sleep(600000l);
+                Thread.sleep(600000L);
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
             complete(message);
-        }, error -> log.error(error.toString()));
-
+        }, error -> {
+            // Terminal signal
+            log.error("Error while receiving messages.", error);
+            isCurrentReceiverDisposed.set(false);
+        }, () -> {
+            // Terminal signal
+            log.info("Receive operation completed.");
+            isCurrentReceiverDisposed.set(false);
+        });
     }
 
-    public synchronized boolean isRunning() {
+    public boolean isRunning() {
         return isRunning.get();
     }
 
-    private synchronized void restartMessageReceiver() {
-        log.error("Restarting message receiver");
-        ServiceBusSessionReceiverAsyncClient receiverClient = asyncClient.get();
-        receiverClient.close();
-        ServiceBusSessionReceiverAsyncClient newReceiverClient = serviceBusClientBuilder.buildAsyncClient();
-
-        asyncClient.set(newReceiverClient);
+    private void restartMessageReceiver() {
         receiveMessages();
     }
 
     @Override
-    public synchronized void close() {
+    public void close() {
+        if (!isRunning.getAndSet(false)) {
+            log.debug("Already closed.");
+            return;
+        }
+
         log.error("close()");
-        isRunning.set(false);
 
-        if (monitorDisposable != null) {
-            monitorDisposable.dispose();
-            monitorDisposable = null;
+        if (!isCurrentReceiverDisposed.get()) {
+            ServiceBusReceiverAsyncClient existingClient = getClient().block(TIMEOUT);
+
+            if (existingClient != null) {
+                existingClient.close();
+            }
         }
-        if (asyncClient.get() != null) {
-            asyncClient.get().close();
-            asyncClient.set(null);
-        }
-    }
-
-    private static boolean isChannelClosed(ServiceBusReceiverAsyncClient client) {
-        boolean isChannelClosed = false;
-        try {
-            Method amqpChannel = null;
-            amqpChannel = client.getClass().getDeclaredMethod("isConnectionClosed");
-            amqpChannel.setAccessible(true);
-
-            isChannelClosed = (boolean) amqpChannel.invoke(client);
-        } catch (NoSuchMethodException | InvocationTargetException |
-                 IllegalAccessException e) {
-            throw new RuntimeException(e);
-        }
-
-        return isChannelClosed;
     }
 
     public void complete(ServiceBusReceivedMessage message) {
-        final ServiceBusReceiverAsyncClient lowLevelClient =
-                this.asyncClient.get().acceptSession(sessionId).block();
-
-        lowLevelClient.complete(message).block();
+        getClient().map(client -> client.complete(message)).block(TIMEOUT);
 
     }
 
     public void abandon(ServiceBusReceivedMessage message) {
-        final ServiceBusReceiverAsyncClient lowLevelClient =
-                this.asyncClient.get().acceptSession(sessionId).block();
-
-        lowLevelClient.abandon(message).block();
+        getClient().map(client -> client.abandon(message)).block(TIMEOUT);
     }
 
     public void deadLetter(ServiceBusReceivedMessage message) {
-        final ServiceBusReceiverAsyncClient lowLevelClient =
-                this.asyncClient.get().acceptSession(sessionId).block();
+        getClient().map(client -> client.deadLetter(message)).block(TIMEOUT);
+    }
 
-        lowLevelClient.deadLetter(message).block();
+    /**
+     * Either gets a new client or the cached one.
+     */
+    public Mono<ServiceBusReceiverAsyncClient> getClient() {
+        return Mono.defer(() -> {
+            log.info("Creating new service bus session client.");
+            ServiceBusSessionReceiverAsyncClient client = serviceBusClientBuilder.buildAsyncClient();
+
+            return client.acceptSession(sessionId);
+        }).cacheInvalidateIf(client -> {
+            return isCurrentReceiverDisposed.get();
+        });
     }
 }
